@@ -1,7 +1,22 @@
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from tqdm import tqdm
+
+# set random seed
+torch.manual_seed(1337)
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available() else "cpu"
+)
+
 # Config
 epochs = 1_0000
 batch_size = 64  # how many independent sequences will we process in parallel
 sequence_len = 128  # what is the maximum context length for predictions
+n_embd = 32  # embedding demension.
 eval_interval = 100
 
 # setp 1. read the text input
@@ -36,17 +51,6 @@ print(ecode("hello world"))
 print(decode(ecode("hello world")))
 
 # setp 3. encode the entire text dataset and store it into a torch.Tensor
-import torch
-
-# set random seed
-torch.manual_seed(1337)
-
-device = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps" if torch.backends.mps.is_available() else "cpu"
-)
-
 
 data = torch.tensor(ecode(text), dtype=torch.long)
 print(data.shape, data.dtype)
@@ -99,19 +103,22 @@ for b in range(batch_size):  # batch dimension
 
 
 # Bigram Model
-import torch.nn as nn
-from torch.nn import functional as F
-
-
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self, vocab_size, n_embd):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(sequence_len, n_embd)
+        self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
+        B, T = idx.shape
         # idx and targets are both (B, T) tensor of integers
-        logits = self.token_embedding_table(idx)  # (B, T, C) => (4, 8, 65)
+        tok_emb = self.token_embedding_table(idx)  # (B, T, C)
+        # (T, C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        tok_emb += pos_emb
+        logits = self.lm_head(tok_emb)  # (B, T, vocab_size)
 
         if targets is None:
             loss = None
@@ -140,7 +147,7 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 
-model = BigramLanguageModel(vocab_size).to(device)
+model = BigramLanguageModel(vocab_size, n_embd).to(device)
 logits, loss = model(xb, yb)
 print(logits.shape)
 print(loss)
@@ -150,8 +157,6 @@ print(decode(model.generate(idx, max_new_tokens=100)[0].tolist()))
 
 # Train the model
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-
-from tqdm import tqdm
 
 
 @torch.inference_mode(True)
