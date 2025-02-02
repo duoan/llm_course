@@ -129,14 +129,27 @@ class Head(nn.Module):
         return out
 
 
+class MultiHeadAttention(nn.Module):
+    """multiple heads of self-attention in parallel
+    it allow the token able to talk to other tokens in diferrent values.
+    """
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+
+
 # Bigram Model
 class BigramLanguageModel(nn.Module):
-    def __init__(self, vocab_size, n_embd):
+    def __init__(self, vocab_size, n_embd, n_head=4):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(sequence_len, n_embd)
-        self.sa_head = Head(n_embd)
+        self.sa_head = MultiHeadAttention(n_head, n_embd // n_head)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
