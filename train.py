@@ -1,3 +1,9 @@
+# Config
+epochs = 1_0000
+batch_size = 64  # how many independent sequences will we process in parallel
+sequence_len = 128  # what is the maximum context length for predictions
+eval_interval = 100
+
 # setp 1. read the text input
 with open("data/input.txt", "r", encoding="utf-8") as f:
     text = f.read()
@@ -34,6 +40,14 @@ import torch
 
 # set random seed
 torch.manual_seed(1337)
+
+device = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available() else "cpu"
+)
+
+
 data = torch.tensor(ecode(text), dtype=torch.long)
 print(data.shape, data.dtype)
 print(data[:1000])
@@ -43,7 +57,7 @@ n = int(0.9 * len(data))  # first 90% will be train, rest for evaluation
 data_train, data_valid = data[:n], data[n:]
 
 # We train the model chunk by chunk [a sequence]
-sequence_len = 8
+
 print(data_train[: sequence_len + 1])
 
 # Demo the example of the training
@@ -55,10 +69,6 @@ for t in range(sequence_len):
     print(f"when input is {context} the target: {target}")
 
 
-batch_size = 4  # how many independent sequences will we process in parallel
-sequence_len = 8  # what is the maximum context length for predictions
-
-
 def get_batch(split):
     # generate a small batch of data of inputs x and targets y
     data = data_train if split == "train" else data_valid
@@ -66,7 +76,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - sequence_len, (batch_size,))
     x = torch.stack([data[i : i + sequence_len] for i in ix])
     y = torch.stack([data[i + 1 : i + sequence_len + 1] for i in ix])
-    return x, y
+    return x.to(device), y.to(device)
 
 
 xb, yb = get_batch("train")
@@ -130,22 +140,43 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 
-model = BigramLanguageModel(vocab_size)
+model = BigramLanguageModel(vocab_size).to(device)
 logits, loss = model(xb, yb)
 print(logits.shape)
 print(loss)
 
-idx = torch.zeros((1, 1), dtype=torch.long)
+idx = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(model.generate(idx, max_new_tokens=100)[0].tolist()))
 
 # Train the model
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-batch_size = 32
-epochs = 10_000
+
 from tqdm import tqdm
 
+
+@torch.inference_mode(True)
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ["train", "valid"]:
+        losses = torch.zeros(eval_interval)
+        for k in range(eval_interval):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+
 status = tqdm(range(epochs), desc="Training", unit="epoch")
-for steps in status:
+for epoch in status:
+    if epoch % eval_interval == 0:
+        losses = estimate_loss()
+        status.set_postfix_str(
+            f"loss:{losses['train']:.4f}, val_loss:{losses['valid']:.4f}"
+        )
+
     # sample a batch of data
     xb, yb = get_batch("train")
 
@@ -155,9 +186,7 @@ for steps in status:
     loss.backward()
     optimizer.step()
 
-    status.set_postfix_str(f"loss:{loss.item():.4f}")
-
 print(f"loss:{loss.item()}")
 
-idx = torch.zeros((1, 1), dtype=torch.long)
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(model.generate(idx, max_new_tokens=500)[0].tolist()))
