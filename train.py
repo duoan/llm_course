@@ -76,11 +76,12 @@ class Head(nn.Module):
 
     def __init__(self, head_size):
         super().__init__()
-        # What information should this token focus on?
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        # What does this token represent?
+        # Q: What does this token represent?
+        # K: What information should this token focus on?
+        # V: What information does this token contain?
+        # Init Q_w, K_w, V_w matricies. Q x Q_w
         self.query = nn.Linear(n_embd, head_size, bias=False)
-        # What information does this token contain?
+        self.key = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(sequence_len, sequence_len)))
         self.dropout = nn.Dropout(dropout)
@@ -89,34 +90,60 @@ class Head(nn.Module):
         # input of size (batch, time-step, channels)
         # output of size (batch, time-step, head_size)
         B, T, C = x.shape
-        k = self.key(x)  # (B, T, C)
-        q = self.query(x)  # (B, T, C)
-        # compute attention scores ("affinities")
+        q = self.query(x)  # Compute the Q, (B, T, C)
+        k = self.key(x)  # Compute K, (B, T, C)
+        # Compute attention scores ("affinities")
         # Attention scores represents the similarity between Q and K (how relevant is a token?)
+        # Additionally,
+        # Scaled dot product by dived sqrt(d_k) to prevent softmax got extermly values.
+        # This will help gradient.
         wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) -> (B, T, T)
+        # We are training a causal model (predict next token).
+        # Need to mask those unseen tokens' attension scores
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
+        # Compute attention weights
+        # The attention weights
+        # 1. tell us how much focus each token should place on every other token.
+        # 2. act as a "filter" that tells us how much of each token's value should contribute to the output.
+        # Softmax-normalized scores (focus level on each token),
+        # not the whole batch softmax to avoid mixing other sentence information.
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
         wei = self.dropout(wei)
-        # perform the weighted aggregation of the values
-        v = self.value(x)  # (B, T, C)
+        v = self.value(x)  # Compute V, (B, T, C)
+        # Perform the weighted aggregation of the values
+        # Output means each token’s final representation is a weighted combination of all tokens' values.
         out = wei @ v  # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
 
 
 class MultiHeadAttention(nn.Module):
-    """multiple heads of self-attention in parallel
-    It allow the token able to
-    1. talk to other tokens in diferrent ways
-    2. learn different types of relationships between tokens
-    """
+    """multiple heads of self-attention in parallel"""
 
     def __init__(self, num_heads, head_size):
         super().__init__()
+        """
+        Multi-heads to learn. It allow the token able to
+        1. talk to other tokens in diferrent ways
+        2. learn different types of relationships between tokens.
+        --------------------------------------------------------------------------
+        Imagine each attention head is looking at a different aspect of a sentence:
+        - One head focuses on word order.
+        - Another captures long-range dependencies.
+        - Another looks at synonyms.
+        """
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        """
+        Blends multi-attention perspectives together across heads.
+        Each attention head learns different patterns (e.g., syntax, long-range dependencies, or local word relationships). 
+        However, after concatenation, the information from each head is still separated in different subspaces.
+        - The linear layer projects the concatenated outputs back into the original embedding space
+        - It enables the model to combine information from all heads effectively rather than treating them as separate entities.
+        """
         self.proj = nn.Linear(n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
+        # Concatenation brings all these views together
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.proj(out)
         out = self.dropout(out)
@@ -168,8 +195,14 @@ class Block(nn.Module):
         self.ffwd = FeedFoward(n_embd)
 
     def forward(self, x):
-        # residual connect
-        # https://medium.com/towards-data-science/residual-blocks-building-blocks-of-resnet-fd90ca15d6ec
+        """
+        The residual connection actively
+        1. prevents vanishing gradients
+        2. stabilize training
+        3. improve information flow
+        4. Speeds Up Training and Improves Convergence
+        https://medium.com/towards-data-science/residual-blocks-building-blocks-of-resnet-fd90ca15d6ec
+        """
         x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
         return x
@@ -287,7 +320,7 @@ class BigramLanguageModel(nn.Module):
         In essence, token embeddings give you a representation of the meaning of the token in the context of the vocabulary.
         """
         tok_emb = self.token_embedding_table(idx)  # (B, T, C)
-        # (T, C)
+
         """
         🚀 Positional Embeddings (pos_emb)
         - Positional embeddings are designed to give the model information about the position of each token in the sequence. 
@@ -297,9 +330,9 @@ class BigramLanguageModel(nn.Module):
         - The positional encoding helps the Transformer model understand which token is first, second, third, etc., in the sequence.
         Without positional embeddings, the model wouldn't know the order of the tokens (whether "dog eats cat" is different from "cat eats dog").
         """
-        pos_emb = self.positional_encoding(
-            tok_emb
-        )  # Apply sinusoidal position encoding
+        # Apply sinusoidal position encoding
+        pos_emb = self.positional_encoding(tok_emb)
+
         """
         🚀 Summary
         - Token embeddings give the semantic meaning of tokens.
