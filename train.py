@@ -1,9 +1,9 @@
-from sympy import im
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torchinfo import summary
 from tqdm import tqdm
+import math
 
 # set random seed
 torch.manual_seed(1337)
@@ -73,8 +73,11 @@ class Head(nn.Module):
 
     def __init__(self, head_size):
         super().__init__()
+        # What information should this token focus on?
         self.key = nn.Linear(n_embd, head_size, bias=False)
+        # What does this token represent?
         self.query = nn.Linear(n_embd, head_size, bias=False)
+        # What information does this token contain?
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(sequence_len, sequence_len)))
         self.dropout = nn.Dropout(dropout)
@@ -86,6 +89,7 @@ class Head(nn.Module):
         k = self.key(x)  # (B, T, C)
         q = self.query(x)  # (B, T, C)
         # compute attention scores ("affinities")
+        # Attention scores represents the similarity between Q and K (how relevant is a token?)
         wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) -> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
@@ -143,17 +147,18 @@ class Block(nn.Module):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
         head_size = n_embd // n_head
-        # add layer normal to avoid over fitting
-        # It ensures that the activations have a mean of 0 and a variance of 1 across the feature dimension for each sample,
-        # making the optimization process smoother.
-        # 1. Works Well for Small Batch Sizes
-        # LayerNorm works independently for each input, making it ideal for NLP, Transformers, and RL
-        # 2.Stable Training
-        # Normalizing across features prevents large activation shifts, improving convergence.
-        # 3. LayerNorm before/after attention layers to stabilize gradients.
-        # Cons, Slightly higher
-        # layer normal https://arxiv.org/abs/1607.06450
-
+        """
+        Adding layer normal to avoid over fitting
+        It ensures that the activations have a mean of 0 and a variance of 1 across the feature dimension for each sample,
+        making the optimization process smoother.
+        1. Works Well for Small Batch Sizes
+        LayerNorm works independently for each input, making it ideal for NLP, Transformers, and RL
+        2.Stable Training
+        Normalizing across features prevents large activation shifts, improving convergence.
+        3. LayerNorm before/after attention layers to stabilize gradients.
+        Cons, Slightly higher
+        layer normal https://arxiv.org/abs/1607.06450
+        """
         self.ln1 = nn.LayerNorm(n_embd)
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ln2 = nn.LayerNorm(n_embd)
@@ -167,13 +172,100 @@ class Block(nn.Module):
         return x
 
 
+class SinusoidalPositionalEncoding(nn.Module):
+    """
+    Sinusoidal encodings allow Transformers to understand order without recurrence.
+    --------------------------------------------------------------------------------------------------------------------------
+    There are two main approaches of position embedding,
+    1. Learned Positional Embeddings
+       - Each position gets an embedding vector (like token embeddings).
+       - Pros: Simple, effective.
+       - Cons: Limited to training sequence lengths.
+               If you train a model with sequence_len = 256,
+               the position embeddings are trained only for indices 0 to 255.
+               If you try to infer with a longer sequence (e.g., 512 tokens),
+               there's no learned embedding for those new positions → the model fails to generalize.
+    2. Sinusoidal Positional Encoding
+       - Uses sine and cosine functions to generate a continuous representation for each position.
+       - Pros: Generalizes well, supports arbitrary sequence lengths.
+       - Cons: More complex.
+
+    📌 If your model always works with fixed-length sequences (e.g., BERT trained on 512 tokens), learned embeddings work fine.
+    However, for arbitrary-length sequences (e.g., GPT-style autoregressive generation), sinusoidal encodings are preferable.
+    --------------------------------------------------------------------------------------------------------------------------
+    🚀 Why Sinusoidal Works
+    1. Handles arbitrary sequence lengths:
+       Unlike learned embeddings, this method generalizes beyond training data.
+       Generalizes to any sequence length:
+         Because it's a continuous function, it can be evaluated at any position,
+         even those not seen during training.
+    2. Encodes absolute & relative positions:
+        Different positions have different encodings, helping the model understand order.
+    3. Smooth transitions:
+       The sine/cosine functions ensure gradual changes between positions.
+    --------------------------------------------------------------------------------------------------------------------------
+    🚀 Why Use the Division:
+    1. 10000/2^(i/d) controls frequency scaling
+       - Each dimension of the positional encoding represents a different wavelength of a sine/cosine wave.
+       - The denominator scales down the position index.
+       - As i (the embedding dimension index) increases, the frequency of the sine wave decreases.
+       - Higher dimensions capture broader positional differences (long-range dependencies).
+       - Lower dimensions capture finer-grained differences (short-range dependencies).
+    2. Why use an exponential scale?
+       If we just used sin(pos), the frequency would be too high, and small position changes would result in large oscillations.
+       Instead, we divide by 10000^2i/d so that
+       - For small values of i, the frequency is high, capturing fine-grained token positions.
+       - For large values of i, the frequency is low, capturing long-range dependencies.
+    --------------------------------------------------------------------------------------------------------------------------
+    🚀 Why Use Separate Sine and Cosine?
+    We use sine for even indices and cosine for odd indices to
+    - Ensure orthogonality between different dimensions.
+    - Allow for better expressiveness in encoding positions.
+    - Make the position encoding unique and invertible (you can recover the position from the encoding).
+    --------------------------------------------------------------------------------------------------------------------------
+    ✅ Example: How It Works
+    Let’s take d = 4 (4-dimensional embeddings) and calculate the encoding for pos = 1, 2, 3
+    |pos | PE(0) = sin	   | PE(1) = cos	 | PE(2) = sin	        | PE(3) = cos          |
+    |1	 | sin(1 / 10000⁰) | cos(1 / 10000⁰) | sin(1 / 10000^(2/4)) | cos(1 / 10000^(2/4)) |
+    |2	 | sin(2 / 10000⁰) | cos(2 / 10000⁰) | sin(2 / 10000^(2/4)) | cos(2 / 10000^(2/4)) |
+    |3	 | sin(3 / 10000⁰) | cos(3 / 10000⁰) | sin(3 / 10000^(2/4)) | cos(3 / 10000^(2/4)) |
+    --------------------------------------------------------------------------------------------------------------------------
+    """
+
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+
+        # Create a matrix of shape (max_len, d_model)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(
+            1
+        )  # (max_len, 1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )
+
+        # Apply sine to even indices, cosine to odd indices
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        # Add a batch dimension
+        pe = pe.unsqueeze(0)  # Shape: (1, max_len, d_model)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        """Adds positional encoding to input embeddings."""
+        return x + self.pe[:, : x.size(1), :]
+
+
 # Bigram Model
 class BigramLanguageModel(nn.Module):
     def __init__(self, vocab_size, n_embd, n_head=4):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(sequence_len, n_embd)
+        self.positional_encoding = SinusoidalPositionalEncoding(
+            n_embd, max_len=sequence_len
+        )
         self.blocks = nn.Sequential(
             *[Block(n_embd, n_head=n_head) for _ in range(n_blocks)]
         )
@@ -183,9 +275,47 @@ class BigramLanguageModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         # idx and targets are both (B, T) tensor of integers
+        """
+        🚀 Token Embeddings (tok_emb)
+        - Token embeddings are the learned representations of the individual tokens (words, characters, or subwords) in your vocabulary.
+        - When a token (such as a word or subword) is input into the model, its index in the vocabulary is used to look up the corresponding embedding.
+        - These embeddings capture semantic meaning. For instance, the token "cat" might have an embedding that contains information about 
+          the object "cat", similar to how "dog" is represented but distinct from "fish."
+        In essence, token embeddings give you a representation of the meaning of the token in the context of the vocabulary.
+        """
         tok_emb = self.token_embedding_table(idx)  # (B, T, C)
         # (T, C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        """
+        🚀 Positional Embeddings (pos_emb)
+        - Positional embeddings are designed to give the model information about the position of each token in the sequence. 
+          This is crucial because, unlike RNNs or CNNs, Transformers don’t inherently process tokens sequentially or in any particular order.
+        - The positional encoding (often created using a sinusoidal function) allows the model to distinguish the position of 
+          a token within the sequence.
+        - The positional encoding helps the Transformer model understand which token is first, second, third, etc., in the sequence.
+        Without positional embeddings, the model wouldn't know the order of the tokens (whether "dog eats cat" is different from "cat eats dog").
+        """
+        pos_emb = self.positional_encoding(
+            tok_emb
+        )  # Apply sinusoidal position encoding
+        """
+        🚀 Summary
+        - Token embeddings give the semantic meaning of tokens.
+        - Positional embeddings give the relative positions of the tokens in the sequence.
+        - By adding them together, we create a combined representation that captures both meaning and order.
+        - This combined embedding is then fed into the model, enabling it to learn relationships between the tokens and their positions in the sequence.
+        
+        🚀 Why Adding the Embeddings Works
+        The key point here is that adding token embeddings and positional embeddings allows the model to 
+        leverage both the semantic meaning of the tokens and the position in the sequence simultaneously
+        - Linear Combination of Information. 
+          By adding the embeddings, you combine the content (from the token embeddings) with the position (from the positional embeddings)
+          This combination of information is what enables the model to capture both meaning and context (sequence order) simultaneously.
+        - No Need for Explicit Sequence Handling
+          Transformers do not have any inherent understanding of sequence order, unlike RNNs or LSTMs. 
+          So, by adding positional embeddings to token embeddings, we ensure that each token has information about:
+          - Its identity (what it is, thanks to token embeddings), and
+          - Its position (where it is in the sequence, thanks to positional embeddings).
+        """
         x = tok_emb + pos_emb  # (B, T, C)
         x = self.blocks(x)  # (B, T, C)
         x = self.ln_f(x)  # (B, T, C)
