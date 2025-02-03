@@ -28,10 +28,6 @@ eval_interval = 100
 log_interval = 10
 learning_rate = 3e-4
 
-# Initialize TensorBoardX writer
-run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-writer = SummaryWriter(logdir=f"runs/experiment_{run_id}")
-
 # setp 1. read the text input
 with open("data/input.txt", "r", encoding="utf-8") as f:
     text = f.read()
@@ -365,9 +361,6 @@ fake_input = torch.randint(
 print(summary(model, input_data=fake_input))
 print("---------------------------------")
 
-# Train the model
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
 
 @torch.inference_mode(True)
 def estimate_loss():
@@ -389,67 +382,83 @@ patience = 5  # Number of epochs to wait for improvement before stopping
 best_val_loss = float("inf")  # Initialize best validation loss to infinity
 epochs_without_improvement = 0  # Counter for epochs without improvement
 
+
+# Train the model
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, "min", patience=3, factor=0.5
 )
 
-status = tqdm(range(epochs), desc="Training", unit="epoch")
-for epoch in status:
-    current_lr = optimizer.param_groups[0]["lr"]
-    writer.add_scalar("Learning Rate", current_lr, epoch)
+# Specific a run_id for each experiment
+run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+# run dir and model output paths
+run_dir = "runs/experiment_{run_id}"
+checkpoint_path = f"{run_dir}/best_model.pth"
+final_model_path = f"{run_id}/final_model.pth"
 
-    # sample a batch of data
-    xb, yb = get_batch("train")
+# Initialize TensorBoardX writer
+with SummaryWriter(logdir=run_dir) as writer:
+    status = tqdm(range(epochs), desc="Training", unit="epoch")
+    for epoch in status:
+        current_lr = optimizer.param_groups[0]["lr"]
+        writer.add_scalar("Learning Rate", current_lr, epoch)
 
-    if epoch % eval_interval == 0:
-        losses = estimate_loss()
-        status.set_postfix_str(
-            f"loss:{losses['train']:.4f}, val_loss:{losses['valid']:.4f}"
-        )
+        # sample a batch of data
+        xb, yb = get_batch("train")
 
-        # Log the losses to TensorBoard
-        writer.add_scalar("Loss/train", losses["train"], epoch)
-        writer.add_scalar("Loss/val", losses["valid"], epoch)
+        if epoch % eval_interval == 0:
+            losses = estimate_loss()
+            status.set_postfix_str(
+                f"loss:{losses['train']:.4f}, val_loss:{losses['valid']:.4f}"
+            )
 
-        # Log generated samples
-        generated_text = decode(model.generate(xb, max_new_tokens=100)[0].tolist())
-        writer.add_text("Generated Text", generated_text, epoch)
+            # Log the losses to TensorBoard
+            writer.add_scalar("Loss/train", losses["train"], epoch)
+            writer.add_scalar("Loss/val", losses["valid"], epoch)
 
-        val_loss = losses["valid"]
-        # Update the learning rate scheduler
-        scheduler.step(val_loss)
+            # Log generated samples
+            generated_text = decode(model.generate(xb, max_new_tokens=100)[0].tolist())
+            writer.add_text("Generated Text", generated_text, epoch)
 
-        # Early stopping check
-        # If the validation loss improved, reset the counter
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
+            val_loss = losses["valid"]
+            # Update the learning rate scheduler
+            scheduler.step(val_loss)
 
-        # If no improvement for 'patience' epochs, stop training early
-        if epochs_without_improvement >= patience:
-            print(f"Early stopping triggered at epoch {epoch}.")
-            break
+            # Early stopping check
+            # If the validation loss improved, reset the counter
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_without_improvement = 0
+                # Save the model when validation loss improves
+                print(f"Validation loss improved, saving model at epoch {epoch}.")
+                torch.save(model.state_dict(), checkpoint_path)
+            else:
+                epochs_without_improvement += 1
 
-    # evaluate the loss
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+            # If no improvement for 'patience' epochs, stop training early
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping triggered at epoch {epoch}.")
+                break
 
-    if epoch % log_interval == 0:
-        # Log gradients and weights
-        for name, param in model.named_parameters():
-            writer.add_histogram(f"weights/{name}", param, epoch)
-            writer.add_histogram(f"grads/{name}", param.grad, epoch)
+        # evaluate the loss
+        logits, loss = model(xb, yb)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
 
-writer.add_scalar("Loss/final", loss.item(), epoch)
-print(f"Final loss: {loss.item()}")
+        if epoch % log_interval == 0:
+            # Log gradients and weights
+            for name, param in model.named_parameters():
+                writer.add_histogram(f"weights/{name}", param, epoch)
+                writer.add_histogram(f"grads/{name}", param.grad, epoch)
+
+    writer.add_scalar("Loss/final", loss.item(), epoch)
+    print(f"Final loss: {loss.item()}")
+
 
 # Test generation
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(model.generate(context, max_new_tokens=500)[0].tolist()))
 
-# Close the TensorBoard writer
-writer.close()
+torch.save(model.state_dict(), final_model_path)
+print(f"Final model saved as '{final_model_path}'.")
