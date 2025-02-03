@@ -135,14 +135,27 @@ class Block(nn.Module):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
         head_size = n_embd // n_head
+        # add layer normal to avoid over fitting
+        # It ensures that the activations have a mean of 0 and a variance of 1 across the feature dimension for each sample,
+        # making the optimization process smoother.
+        # 1. Works Well for Small Batch Sizes
+        # LayerNorm works independently for each input, making it ideal for NLP, Transformers, and RL
+        # 2.Stable Training
+        # Normalizing across features prevents large activation shifts, improving convergence.
+        # 3. LayerNorm before/after attention layers to stabilize gradients.
+        # Cons, Slightly higher
+        # layer normal https://arxiv.org/abs/1607.06450
+
+        self.ln1 = nn.LayerNorm(n_embd)
         self.sa = MultiHeadAttention(n_head, head_size)
+        self.ln2 = nn.LayerNorm(n_embd)
         self.ffwd = FeedFoward(n_embd)
 
     def forward(self, x):
         # residual connect
         # https://medium.com/towards-data-science/residual-blocks-building-blocks-of-resnet-fd90ca15d6ec
-        x = x + self.sa(x)
-        x = x + self.ffwd(x)
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
         return x
 
 
@@ -157,6 +170,7 @@ class BigramLanguageModel(nn.Module):
             Block(n_embd, n_head=n_head),
             Block(n_embd, n_head=n_head),
             Block(n_embd, n_head=n_head),
+            nn.LayerNorm(n_embd),
         )
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
