@@ -17,10 +17,13 @@ device = (
 # Config
 epochs = 1_0000
 batch_size = 64  # how many independent sequences will we process in parallel
-sequence_len = 128  # what is the maximum context length for predictions
-n_embd = 32  # embedding demension.
+sequence_len = 256  # what is the maximum context length for predictions
+n_embd = 384  # embedding demension.
+n_blocks = 6
+n_head = 6
+dropout = 0.2
 eval_interval = 100
-learning_rate = 1e-3
+learning_rate = 3e-4
 
 # setp 1. read the text input
 with open("data/input.txt", "r", encoding="utf-8") as f:
@@ -74,6 +77,7 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(sequence_len, sequence_len)))
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         # input of size (batch, time-step, channels)
@@ -85,6 +89,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) -> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float("-inf"))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
+        wei = self.dropout(wei)
         # perform the weighted aggregation of the values
         v = self.value(x)  # (B, T, C)
         out = wei @ v  # (B, T, T) @ (B, T, C) -> (B, T, C)
@@ -102,10 +107,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.proj(out)
+        out = self.dropout(out)
         return out
 
 
@@ -122,6 +129,7 @@ class FeedFoward(nn.Module):
             nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -167,11 +175,9 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(sequence_len, n_embd)
         self.blocks = nn.Sequential(
-            Block(n_embd, n_head=n_head),
-            Block(n_embd, n_head=n_head),
-            Block(n_embd, n_head=n_head),
-            nn.LayerNorm(n_embd),
+            *[Block(n_embd, n_head=n_head) for _ in range(n_blocks)]
         )
+        self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -182,6 +188,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))
         x = tok_emb + pos_emb  # (B, T, C)
         x = self.blocks(x)  # (B, T, C)
+        x = self.ln_f(x)  # (B, T, C)
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
         if targets is None:
@@ -213,7 +220,7 @@ class BigramLanguageModel(nn.Module):
         return idx
 
 
-model = BigramLanguageModel(vocab_size, n_embd).to(device)
+model = BigramLanguageModel(vocab_size, n_embd, n_head).to(device)
 
 fake_input = torch.randint(
     0, vocab_size, (batch_size, sequence_len), dtype=torch.long
