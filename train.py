@@ -1,6 +1,8 @@
+from sympy import im
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torchinfo import summary
 from tqdm import tqdm
 
 # set random seed
@@ -26,13 +28,9 @@ with open("data/input.txt", "r", encoding="utf-8") as f:
 
 print(f"length of dataset in characters: {len(text):,d}")
 
-# Look at the first 1000 characters
-print(text[:1000])
-
 # all the unique characters that occur in this text
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
-print("".join(chars))
 print(f"length of vocab: {vocab_size:,d}")
 
 # setp 2. tokenizing, we use the most simplest approach: char index
@@ -48,32 +46,15 @@ ecode = lambda s: [stoi[c] for c in s]
 # decoder: take a list of integers, output a string
 decode = lambda l: "".join([itos[i] for i in l])
 
-print(ecode("hello world"))
-print(decode(ecode("hello world")))
-
 # setp 3. encode the entire text dataset and store it into a torch.Tensor
-
 data = torch.tensor(ecode(text), dtype=torch.long)
-print(data.shape, data.dtype)
-print(data[:1000])
 
 # setp 4. split up the data into train and validation sets
 n = int(0.9 * len(data))  # first 90% will be train, rest for evaluation
 data_train, data_valid = data[:n], data[n:]
 
+
 # We train the model chunk by chunk [a sequence]
-
-print(data_train[: sequence_len + 1])
-
-# Demo the example of the training
-x = data_train[:sequence_len]
-y = data_train[1 : sequence_len + 1]
-for t in range(sequence_len):
-    context = x[: t + 1]
-    target = y[t]
-    print(f"when input is {context} the target: {target}")
-
-
 def get_batch(split):
     # generate a small batch of data of inputs x and targets y
     data = data_train if split == "train" else data_valid
@@ -82,25 +63,6 @@ def get_batch(split):
     x = torch.stack([data[i : i + sequence_len] for i in ix])
     y = torch.stack([data[i + 1 : i + sequence_len + 1] for i in ix])
     return x.to(device), y.to(device)
-
-
-xb, yb = get_batch("train")
-print("inputs:")
-print(xb.shape)
-print(xb)
-print("targets:")
-print(yb.shape)
-print(yb)
-
-print("----")
-
-for b in range(batch_size):  # batch dimension
-    for t in range(sequence_len):  # time dimension
-        context = xb[b, : t + 1]
-        target = yb[b, t]
-        print(
-            f"batch:[{b}], sequence_idx:[{t}], when input is {context.tolist()} the target: {target}"
-        )
 
 
 class Head(nn.Module):
@@ -174,8 +136,8 @@ class Block(nn.Module):
         self.ffwd = FeedFoward(n_embd)
 
     def forward(self, x):
-        x = x + self.sa(x)
-        x = x + self.ffwd(x)
+        x = self.sa(x)
+        x = self.ffwd(x)
         return x
 
 
@@ -233,12 +195,12 @@ class BigramLanguageModel(nn.Module):
 
 
 model = BigramLanguageModel(vocab_size, n_embd).to(device)
-logits, loss = model(xb, yb)
-print(logits.shape)
-print(loss)
 
-idx = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(model.generate(idx, max_new_tokens=100)[0].tolist()))
+fake_input = torch.randint(
+    0, vocab_size, (batch_size, sequence_len), dtype=torch.long
+).to(device)
+print(summary(model, input_data=fake_input))
+print("---------------------------------")
 
 # Train the model
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -278,5 +240,6 @@ for epoch in status:
 
 print(f"loss:{loss.item()}")
 
+# Test generation
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(model.generate(idx, max_new_tokens=500)[0].tolist()))
+print(decode(model.generate(context, max_new_tokens=500)[0].tolist()))
