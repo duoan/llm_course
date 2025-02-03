@@ -131,7 +131,9 @@ class Head(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     """multiple heads of self-attention in parallel
-    it allow the token able to talk to other tokens in diferrent values.
+    It allow the token able to
+    1. talk to other tokens in diferrent ways
+    2. learn different types of relationships between tokens
     """
 
     def __init__(self, num_heads, head_size):
@@ -142,6 +144,25 @@ class MultiHeadAttention(nn.Module):
         return torch.cat([h(x) for h in self.heads], dim=-1)
 
 
+class FeedFoward(nn.Module):
+    """a simple linear layer followed by a non-linearity
+    Intuition
+    1. Think of self-attention as handling global interactions between tokens
+    2. Transforms each token’s representation in a non-linear way, enriching its features.
+    """
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd),
+            nn.ReLU(),
+            nn.Linear(n_embd, n_embd),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 # Bigram Model
 class BigramLanguageModel(nn.Module):
     def __init__(self, vocab_size, n_embd, n_head=4):
@@ -150,6 +171,7 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(sequence_len, n_embd)
         self.sa_head = MultiHeadAttention(n_head, n_embd // n_head)
+        self.feed_forward = FeedFoward(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -160,7 +182,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))
         x = tok_emb + pos_emb  # (B, T, C)
         x = self.sa_head(x)  # apply one head of self-attention, (B, T, C)
-
+        x = self.feed_forward(x)  # (B, T, C)
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
         if targets is None:
