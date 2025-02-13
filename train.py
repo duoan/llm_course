@@ -170,7 +170,7 @@ class FeedFoward(nn.Module):
         return self.net(x)
 
 
-class Block(nn.Module):
+class TransformerBlock(nn.Module):
     """Transformer block: communication followed by computation"""
 
     def __init__(self, n_embd, n_head):
@@ -298,12 +298,12 @@ class BigramLanguageModel(nn.Module):
     def __init__(self, vocab_size, n_embd, n_head=4):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.word_embedding = nn.Embedding(vocab_size, n_embd)
         self.positional_encoding = SinusoidalPositionalEncoding(
             n_embd, max_len=sequence_len
         )
         self.blocks = nn.Sequential(
-            *[Block(n_embd, n_head=n_head) for _ in range(n_blocks)]
+            *[TransformerBlock(n_embd, n_head=n_head) for _ in range(n_blocks)]
         )
         self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
@@ -312,14 +312,14 @@ class BigramLanguageModel(nn.Module):
         B, T = idx.shape
         # idx and targets are both (B, T) tensor of integers
         """
-        🚀 Token Embeddings (tok_emb)
-        - Token embeddings are the learned representations of the individual tokens (words, characters, or subwords) in your vocabulary.
+        🚀 Word Embeddings (tok_emb)
+        - Word embeddings are the learned representations of the individual tokens (words, characters, or subwords) in your vocabulary.
         - When a token (such as a word or subword) is input into the model, its index in the vocabulary is used to look up the corresponding embedding.
         - These embeddings capture semantic meaning. For instance, the token "cat" might have an embedding that contains information about 
           the object "cat", similar to how "dog" is represented but distinct from "fish."
         In essence, token embeddings give you a representation of the meaning of the token in the context of the vocabulary.
         """
-        tok_emb = self.token_embedding_table(idx)  # (B, T, C)
+        tok_emb = self.word_embedding(idx)  # (B, T, C)
 
         """
         🚀 Positional Embeddings (pos_emb)
